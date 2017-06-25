@@ -19,13 +19,13 @@ void get_dataset(int remove_id, vvd *ds){
 		
 		for(int i = 0; i < len; ++i){
 			if(str[i] != ' '){
-				if(str[i] == ',' || i == len - 1){
-					if(first_ln){
-						if((remove_id == 1 && num_attr > 0) || remove_id == 0){
-							cur_instance.push_back(cur_val);
-						}
-					} else
-						cur_instance[num_attr] = cur_val;
+				if(str[i] == ','){
+					if(first_ln && ((remove_id == 1 && num_attr > 0) || !remove_id))
+						cur_instance.push_back(cur_val);
+					else if(!first_ln){
+						if(remove_id && num_attr > 0) cur_instance[num_attr-1] = cur_val;
+						else if(remove_id == 0) cur_instance[num_attr] = cur_val;
+					}
 				
 					num_attr++;
 					cur_val = 0;
@@ -37,9 +37,13 @@ void get_dataset(int remove_id, vvd *ds){
 			}
 		}
 		
-		ds->push_back(cur_instance);
+		if(first_ln) cur_instance.push_back(cur_val), first_ln = 0;
+		else{
+			if(remove_id) num_attr--;
+			cur_instance[num_attr] = cur_val;
+		}
 		
-		if(first_ln) first_ln = 0;
+		ds->push_back(cur_instance);
 	}
 }
 
@@ -55,8 +59,8 @@ void normalize_ds(vvd *ds){
 			if((*ds)[i][j] < mn) mn = (*ds)[i][j];
 		}
 		
-		for(int i = 0; i < ds_sz.first; i++)
-			((*ds)[i][j]) = ((*ds)[i][j] - mn) / (mx - mn);
+		for(int i = 0; i < ds_sz.first; ++i)
+			(*ds)[i][j] = ((*ds)[i][j] - mn) / (mx - mn);
 	}
 }
 
@@ -70,36 +74,76 @@ double distance(vvd ds, vvd Z, int x, int y){
 	return dist;
 }
 
-void init_U(vvd ds, vvd Z, ii ds_sz, int k, vector<int> *U){
-	int idx;
-	double min_dist, cur_dist;
+void update_U(vvd ds, vvd Z, ii ds_sz, int k, double d_avg, vpid *U){
+	int idx, outlier = 0;
+	double cur_dist;
 
 	for(int i = 0; i < ds_sz.first; ++i){
-		min_dist = 1000000000;
+		(*U)[i].second = 1000000000;
 	
 		for(int j = 0; j < k; ++j){
 			cur_dist = distance(ds, Z, i, j);
 		
-			if(cur_dist < min_dist)
-				min_dist = cur_dist, (*U)[i] = j;
+			if(cur_dist < (*U)[i].second)
+				(*U)[i].second = cur_dist, (*U)[i].first = j;
+		}
+		
+		if((*U)[i].second > d_avg){
+			outlier++;
+			(*U)[i] = ii(k, d_avg);
 		}
 	}
+	
+	// printf("partial: %d\n", outlier);
 }
 
-/*
-double get_average_dist(vvd ds, vector<double> Z, ii ds_sz, vpid *U){
+void update_Z(vvd ds, ii ds_sz, int k, vpid U, vvd *Z){
+	vector<int> occur(k);
+	
+	for(int i = 0; i < k; ++i)
+		for(int j = 0; j < ds_sz.second; ++j) (*Z)[i][j] = 0;
+
 	for(int i = 0; i < ds_sz.first; ++i){
-		
+		if(U[i].first != k){
+			occur[U[i].first]++;
+			
+			for(int j = 0; j < ds_sz.second; ++j)
+				(*Z)[U[i].first][j] += ds[i][j];
+		}
 	}
+	
+	for(int i = 0; i < k; ++i)
+		for(int j = 0; j < ds_sz.second; ++j) (*Z)[i][j] /= occur[i];
+		
+	occur.clear();
 }
 
-void kmor(vvb ds, int k, int gama, int no, int sigma, int nmax, ii ds_sz) {
+double get_avg_dist(ii ds_sz, int k, vpid *U){
+	int cnt = 0;
+	double sum_dist = 0;
+
+	for(int i = 0; i < ds_sz.first; ++i){
+		if((*U)[i].first != k) sum_dist += (*U)[i].second, cnt++;
+	}
+	
+	return sum_dist/cnt;
+}
+
+double get_p(vpid U, ii ds_sz){
+	double p = 0;
+	
+	for(int i = 0; i < ds_sz.first; ++i)
+		p += U[i].second;
+	
+	return p;
+}
+
+void kmor(vvd ds, int k, int gama, int no, int sigma, int nmax, ii ds_sz) {
 	int cnt = 0, r;
-	double prev_p = 0, cur_p;
+	double prev_p = 0, cur_p, d_avg;
 	set<int> s;
 	vvd Z;
-	vector<int> U;
-	vpid close_cluster(ds_sz.first);
+	vpid U(ds_sz.first);
 
 	while(cnt < k){
 		r = rand() % (ds_sz.first + 1);
@@ -113,14 +157,31 @@ void kmor(vvb ds, int k, int gama, int no, int sigma, int nmax, ii ds_sz) {
 	for(set<int>::iterator iter = s.begin(); iter != s.end(); iter++)
 		Z.push_back(ds[*iter]);
 		
-	while(true){
+	update_U(ds, Z, ds_sz, k, 1000000000, &U);
 		
+	for(int i = 0; i < nmax; ++i){
+		d_avg = gama * get_avg_dist(ds_sz, k, &U);
+		update_U(ds, Z, ds_sz, k, d_avg, &U);
+		update_Z(ds, ds_sz, k, U, &Z);
+		cur_p = get_p(U, ds_sz);
+		
+		if(fabs(cur_p - prev_p) < sigma)
+			break;
+		
+		prev_p = cur_p;
 	}
+	
+	int outliers = 0;
+	
+	for(int i = 0; i < ds_sz.first; ++i)
+		if(U[i].first == k) outliers++;
+		
+	printf("Number of outiers: %d\n", outliers);
 }
-*/
 
 int main(){
 	ios_base::sync_with_stdio(0);
+	srand( time( NULL ) );
 	
 	int class_idx, remove_id;
 	pair<int, int> ds_sz;
@@ -130,9 +191,24 @@ int main(){
 	remove_id = 0;
 	
 	get_dataset(remove_id, &ds);
+	normalize_ds(&ds);
 	ds_sz = make_pair(int(ds.size()), int(ds[0].size()));
 	
+	/*
+	for(int i = 0; i < ds_sz.first; ++i){
+		for(int j = 0; j < ds_sz.second; ++j){
+			printf("%.4lf ", ds[i][j]);
+		}
+		printf("\n");
+	}
+	*/
+	
+	int k = 1, gama = 3, no = int(ds_sz.first * 0.1), nmax = 100;
+	double sigma = 1e-6;
+	
 	printf("%d %d\n", ds_sz.first, ds_sz.second);
+	
+	kmor(ds, k, gama, no, sigma, nmax, ds_sz);
 	
 	return 0;
 }
